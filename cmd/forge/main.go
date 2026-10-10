@@ -56,6 +56,7 @@ Usage:
       --rename version_orig                      Renamed module base (default: <name>_orig)
       --out outdir                               Output directory (default: .)
       --arch x64|x86                             Target arch (default: x64)
+      --xor                                      XOR-encode the embedded shellcode
 
 Example:
   forge scan C:\Path\app.exe
@@ -117,6 +118,7 @@ func cmdGenerate(args []string) {
 	rename := fs.String("rename", "", "renamed module base (default <name>_orig)")
 	out := fs.String("out", ".", "output directory")
 	arch := fs.String("arch", "x64", "target arch: x64 or x86")
+	xor := fs.Bool("xor", false, "XOR-encode the embedded shellcode with a random key")
 	fs.Parse(flagArgs)
 
 	if dllPath == "" {
@@ -140,6 +142,7 @@ func cmdGenerate(args []string) {
 		OutDir:      *out,
 		RenameBase:  *rename,
 		Arch:        *arch,
+		XOR:         *xor,
 	}
 
 	files, err := proxy.Generate(cfg)
