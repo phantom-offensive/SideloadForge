@@ -50,10 +50,12 @@ func ImportedLibraries(path string) ([]string, error) {
 	return out, nil
 }
 
-// Export is a single named export from a DLL.
+// Export is a single export from a DLL. If ByOrdinal is true, the export has
+// no name and is identified by Ordinal.
 type Export struct {
-	Name    string
-	Ordinal uint16
+	Name      string
+	Ordinal   uint32
+	ByOrdinal bool
 }
 
 // Exports parses the PE export table and returns the named exports.
@@ -94,7 +96,9 @@ func Exports(path string) ([]Export, error) {
 
 	dir := raw[off : off+0x28]
 	base := binary.LittleEndian.Uint32(dir[0x10:0x14])
+	numberOfFunctions := binary.LittleEndian.Uint32(dir[0x14:0x18])
 	numberOfNames := binary.LittleEndian.Uint32(dir[0x18:0x1C])
+	addrOfFunctions := binary.LittleEndian.Uint32(dir[0x1C:0x20])
 	addrOfNames := binary.LittleEndian.Uint32(dir[0x20:0x24])
 	addrOfNameOrdinals := binary.LittleEndian.Uint32(dir[0x24:0x28])
 
@@ -105,6 +109,14 @@ func Exports(path string) ([]Export, error) {
 	ordOff, err := rvaToOffset(f, addrOfNameOrdinals)
 	if err != nil {
 		return nil, err
+	}
+
+	// First pass: mark which function indices are referenced by a name.
+	named := map[uint32]bool{}
+	for i := uint32(0); i < numberOfNames; i++ {
+		if ordIdx, err := readUint16(raw, ordOff+i*2); err == nil {
+			named[uint32(ordIdx)] = true
+		}
 	}
 
 	var exports []Export
@@ -118,14 +130,33 @@ func Exports(path string) ([]Export, error) {
 			continue
 		}
 		name, err := readCString(raw, nameRVA, f)
-		if err != nil {
+		if err != nil || name == "" {
 			continue
 		}
-		if name == "" {
-			continue
-		}
-		exports = append(exports, Export{Name: name, Ordinal: uint16(base) + ordIdx})
+		exports = append(exports, Export{Name: name, Ordinal: base + uint32(ordIdx)})
 	}
+
+	// Second pass: ordinal-only exports (functions with no name).
+	if numberOfFunctions > 0 {
+		funcOff, err := rvaToOffset(f, addrOfFunctions)
+		if err == nil {
+			for i := uint32(0); i < numberOfFunctions; i++ {
+				if named[i] {
+					continue
+				}
+				funcRVA, err := readUint32(raw, funcOff+i*4)
+				if err != nil || funcRVA == 0 {
+					continue
+				}
+				// Skip forwarders: their RVA points into the export directory.
+				if funcRVA >= exportDir.VirtualAddress && funcRVA < exportDir.VirtualAddress+exportDir.Size {
+					continue
+				}
+				exports = append(exports, Export{Ordinal: base + i, ByOrdinal: true})
+			}
+		}
+	}
+
 	return exports, nil
 }
 
