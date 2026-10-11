@@ -64,6 +64,7 @@ Usage:
       --out outdir                               Output directory (default: .)
       --arch x64|x86                             Target arch (default: x64)
       --xor                                      XOR-encode the embedded shellcode
+      --build                                    Compile the proxy DLL with mingw
 
 Example:
   forge scan C:\Path\app.exe
@@ -128,6 +129,7 @@ func cmdGenerate(args []string) {
 	out := fs.String("out", ".", "output directory")
 	arch := fs.String("arch", "x64", "target arch: x64 or x86")
 	xor := fs.Bool("xor", false, "XOR-encode the embedded shellcode with a random key")
+	build := fs.Bool("build", false, "compile the proxy DLL with mingw immediately")
 	fs.Parse(flagArgs)
 
 	if dllPath == "" {
@@ -152,6 +154,7 @@ func cmdGenerate(args []string) {
 		RenameBase:  *rename,
 		Arch:        *arch,
 		XOR:         *xor,
+		Build:       *build,
 	}
 
 	files, err := proxy.Generate(cfg)
