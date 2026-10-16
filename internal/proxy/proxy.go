@@ -230,7 +230,7 @@ func writeEncodedName(sb *strings.Builder, varName, s string, key byte) {
 		}
 		fmt.Fprintf(sb, " 0x%02x", s[i]^key)
 	}
-	sb.WriteString(" };\n")
+	sb.WriteString(", 0x00 };\n")
 }
 
 func genC(payload, key []byte, renameBase, mode string, sleepMs int) string {
