@@ -91,8 +91,11 @@ make build-linux        # Linux amd64
   forwarders, so exports with no name are not proxied (typically unused
   legacy/internal functions). Named exports are forwarded by name.
 - **Shellcode is embedded as a byte array** — `--xor` raises the bar but is not
-  strong encryption. Treat generated DLLs as detectable; combine with your own
-  C2 shellcode's encoding.
+  strong encryption; `--rc4` is stronger but still static. Treat generated DLLs
+  as detectable; combine with your own C2 shellcode's encoding.
+- **`VirtualAlloc`/`VirtualProtect`/`CreateThread`/`Sleep` are resolved at
+  runtime** via `GetProcAddress` with XOR-encoded names (no plaintext import
+  strings). `LoadLibraryA` and `GetProcAddress` remain as imports.
 - **`version.dll` is a KnownDLL** on Windows, so it resolves from System32 and
   is *not* sideloadable from an app directory — pick a non-KnownDLL import
   (which `scan` surfaces).
