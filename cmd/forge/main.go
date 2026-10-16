@@ -65,6 +65,7 @@ Usage:
       --arch x64|x86                             Target arch (default: x64)
       --xor                                      XOR-encode the embedded shellcode
       --build                                    Compile the proxy DLL with mingw
+      --compiler x86_64-w64-mingw32-gcc          Custom mingw compiler (optional)
 
 Example:
   forge scan C:\Path\app.exe
@@ -108,6 +109,14 @@ func cmdScan(args []string) {
 		}
 		fmt.Printf("  %s %s\n", mark, l)
 	}
+
+	if signed, size, err := pe.AuthenticodeSignature(target); err == nil {
+		if signed {
+			fmt.Printf("\nAuthenticode signature: present (%d-byte certificate table)\n", size)
+		} else {
+			fmt.Println("\nAuthenticode signature: none (unsigned)")
+		}
+	}
 }
 
 func cmdGenerate(args []string) {
@@ -130,6 +139,7 @@ func cmdGenerate(args []string) {
 	arch := fs.String("arch", "x64", "target arch: x64 or x86")
 	xor := fs.Bool("xor", false, "XOR-encode the embedded shellcode with a random key")
 	build := fs.Bool("build", false, "compile the proxy DLL with mingw immediately")
+	compiler := fs.String("compiler", "", "mingw compiler path (default: x86_64-w64-mingw32-gcc or i686-w64-mingw32-gcc by arch)")
 	fs.Parse(flagArgs)
 
 	if dllPath == "" {
@@ -155,6 +165,7 @@ func cmdGenerate(args []string) {
 		Arch:        *arch,
 		XOR:         *xor,
 		Build:       *build,
+		Compiler:    *compiler,
 	}
 
 	files, err := proxy.Generate(cfg)
@@ -164,12 +175,16 @@ func cmdGenerate(args []string) {
 	}
 
 	base := strings.TrimSuffix(filepath.Base(dllPath), filepath.Ext(dllPath))
+	renameBase := *rename
+	if renameBase == "" {
+		renameBase = base + "_orig"
+	}
 	fmt.Println("Generated proxy DLL source:")
 	for _, f := range files {
 		fmt.Printf("  %s\n", f)
 	}
 	fmt.Println("\nNext steps:")
-	fmt.Printf("  1. Rename the real %[1]s.dll to %[2]s.dll\n", base, base+"_orig")
+	fmt.Printf("  1. Rename the real %[1]s.dll to %[2]s.dll\n", base, renameBase)
 	fmt.Printf("  2. Run build.bat (or: x86_64-w64-mingw32-gcc -shared -o %[1]s.dll proxy.c %[1]s.def)\n", base)
 	fmt.Printf("  3. Drop the new %[1]s.dll next to the signed app\n", base)
 }

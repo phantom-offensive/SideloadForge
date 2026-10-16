@@ -1,0 +1,16 @@
+# Build artifacts
+/forge
+/forge.exe
+/build/
+
+# Generated proxy payloads
+*.dll
+*.def
+*.bin
+proxy.c
+build.bat
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

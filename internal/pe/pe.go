@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-// ImportedLibraries returns the unique lowercase DLL names imported by a PE file.
+// ImportedLibraries returns the unique lowercase DLL names imported by a PE file,
+// including delay-loaded DLLs.
 func ImportedLibraries(path string) ([]string, error) {
 	f, err := pe.Open(path)
 	if err != nil {
@@ -33,21 +34,118 @@ func ImportedLibraries(path string) ([]string, error) {
 				out = append(out, dll)
 			}
 		}
-		return out, nil
+	} else {
+		libs, err := f.ImportedLibraries()
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range libs {
+			l = strings.ToLower(l)
+			if !seen[l] {
+				seen[l] = true
+				out = append(out, l)
+			}
+		}
 	}
 
-	libs, err := f.ImportedLibraries()
+	// Delay-loaded DLLs are also sideload candidates.
+	if delay, err := DelayImportedLibraries(path); err == nil {
+		for _, d := range delay {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+	}
+
+	return out, nil
+}
+
+// DelayImportedLibraries returns the lowercase DLL names referenced by the PE
+// delay-load import directory (IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT).
+func DelayImportedLibraries(path string) ([]string, error) {
+	f, err := pe.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	for _, l := range libs {
-		l = strings.ToLower(l)
-		if !seen[l] {
-			seen[l] = true
-			out = append(out, l)
+	defer f.Close()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var dataDir [16]pe.DataDirectory
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		dataDir = oh.DataDirectory
+	case *pe.OptionalHeader64:
+		dataDir = oh.DataDirectory
+	default:
+		return nil, fmt.Errorf("unsupported PE optional header")
+	}
+
+	delayDir := dataDir[13] // IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT
+	if delayDir.VirtualAddress == 0 || delayDir.Size == 0 {
+		return nil, nil
+	}
+
+	off, err := rvaToOffset(f, delayDir.VirtualAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]bool{}
+	var out []string
+
+	// ImgDelayDescr is 32 bytes (0x20). Iterate until the all-zero terminator.
+	for i := 0; ; i++ {
+		descOff := uint32(int(off) + i*0x20)
+		if int(descOff)+0x20 > len(raw) {
+			break
+		}
+		attrs := binary.LittleEndian.Uint32(raw[descOff : descOff+4])
+		nameRVA := binary.LittleEndian.Uint32(raw[descOff+4 : descOff+8])
+		if attrs == 0 && nameRVA == 0 {
+			break
+		}
+		name, err := readCString(raw, nameRVA, f)
+		if err != nil || name == "" {
+			continue
+		}
+		name = strings.ToLower(name)
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
 		}
 	}
 	return out, nil
+}
+
+// AuthenticodeSignature reports whether the PE has a certificate table
+// (IMAGE_DIRECTORY_ENTRY_SECURITY) and its size in bytes.
+func AuthenticodeSignature(path string) (signed bool, size int, err error) {
+	f, err := pe.Open(path)
+	if err != nil {
+		return false, 0, err
+	}
+	defer f.Close()
+
+	var dataDir [16]pe.DataDirectory
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		dataDir = oh.DataDirectory
+	case *pe.OptionalHeader64:
+		dataDir = oh.DataDirectory
+	default:
+		return false, 0, fmt.Errorf("unsupported PE optional header")
+	}
+
+	sec := dataDir[4] // IMAGE_DIRECTORY_ENTRY_SECURITY
+	if sec.VirtualAddress == 0 && sec.Size == 0 {
+		return false, 0, nil
+	}
+	return true, int(sec.Size), nil
 }
 
 // Export is a single export from a DLL. If ByOrdinal is true, the export has
