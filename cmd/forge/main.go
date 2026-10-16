@@ -64,8 +64,10 @@ Usage:
       --out outdir                               Output directory (default: .)
       --arch x64|x86                             Target arch (default: x64)
       --xor                                      XOR-encode the embedded shellcode
+      --rc4                                      RC4-encrypt the embedded shellcode
       --build                                    Compile the proxy DLL with mingw
       --compiler x86_64-w64-mingw32-gcc          Custom mingw compiler (optional)
+      --sleep 5000                               Sleep (ms) before running shellcode
 
 Example:
   forge scan C:\Path\app.exe
@@ -138,8 +140,10 @@ func cmdGenerate(args []string) {
 	out := fs.String("out", ".", "output directory")
 	arch := fs.String("arch", "x64", "target arch: x64 or x86")
 	xor := fs.Bool("xor", false, "XOR-encode the embedded shellcode with a random key")
+	rc4 := fs.Bool("rc4", false, "RC4-encrypt the embedded shellcode with a random key (stronger than --xor)")
 	build := fs.Bool("build", false, "compile the proxy DLL with mingw immediately")
 	compiler := fs.String("compiler", "", "mingw compiler path (default: x86_64-w64-mingw32-gcc or i686-w64-mingw32-gcc by arch)")
+	sleep := fs.Int("sleep", 0, "sleep (ms) before running shellcode")
 	fs.Parse(flagArgs)
 
 	if dllPath == "" {
@@ -164,6 +168,8 @@ func cmdGenerate(args []string) {
 		RenameBase:  *rename,
 		Arch:        *arch,
 		XOR:         *xor,
+		RC4:         *rc4,
+		SleepMs:     *sleep,
 		Build:       *build,
 		Compiler:    *compiler,
 	}

@@ -61,8 +61,10 @@ forge generate <original.dll> --shellcode payload.bin [flags]
 | `--out` | `.` | Output directory |
 | `--arch` | `x64` | Target arch: `x64` or `x86` |
 | `--xor` | false | XOR-encode the embedded shellcode with a random 16-byte key |
+| `--rc4` | false | RC4-encrypt the embedded shellcode with a random 16-byte key (stronger than `--xor`) |
 | `--build` | false | Compile the proxy DLL with mingw immediately |
 | `--compiler` | auto | mingw compiler (default `x86_64-w64-mingw32-gcc` / `i686-w64-mingw32-gcc`) |
+| `--sleep` | `0` | Sleep (ms) before running shellcode |
 
 Example:
 
