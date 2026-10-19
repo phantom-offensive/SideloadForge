@@ -144,6 +144,8 @@ func cmdGenerate(args []string) {
 	build := fs.Bool("build", false, "compile the proxy DLL with mingw immediately")
 	compiler := fs.String("compiler", "", "mingw compiler path (default: x86_64-w64-mingw32-gcc or i686-w64-mingw32-gcc by arch)")
 	sleep := fs.Int("sleep", 0, "sleep (ms) before running shellcode")
+	inject := fs.Bool("inject", false, "run shellcode via process injection (vs self-injection)")
+	target := fs.String("target", `C:\Windows\System32\notepad.exe`, "injection target executable path")
 	fs.Parse(flagArgs)
 
 	if dllPath == "" {
@@ -170,6 +172,8 @@ func cmdGenerate(args []string) {
 		XOR:         *xor,
 		RC4:         *rc4,
 		SleepMs:     *sleep,
+		Inject:      *inject,
+		TargetExe:   *target,
 		Build:       *build,
 		Compiler:    *compiler,
 	}
